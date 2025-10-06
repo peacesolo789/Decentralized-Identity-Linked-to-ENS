@@ -9,6 +9,10 @@
 (define-constant err-domain-expired (err u107))
 (define-constant err-insufficient-payment (err u108))
 (define-constant err-domain-not-expired (err u109))
+(define-constant err-subdomain-exists (err u110))
+(define-constant err-subdomain-not-found (err u111))
+(define-constant err-invalid-subdomain (err u112))
+(define-constant err-parent-domain-not-found (err u113))
 
 (define-map domains 
   { domain: (string-ascii 63) }
@@ -46,7 +50,21 @@
   { domain: (string-ascii 63) }
   { resolver-address: (string-ascii 42) })
 
+(define-map subdomains
+  { parent-domain: (string-ascii 63), subdomain-label: (string-ascii 63) }
+  {
+    owner: principal,
+    resolver: principal,
+    created-at: uint,
+    updated-at: uint
+  })
+
+(define-map subdomain-records
+  { parent-domain: (string-ascii 63), subdomain-label: (string-ascii 63), record-type: (string-ascii 10) }
+  { value: (string-ascii 256), ttl: uint })
+
 (define-data-var total-domains uint u0)
+(define-data-var total-subdomains uint u0)
 (define-data-var registration-fee uint u1000000)
 (define-data-var min-domain-length uint u3)
 (define-data-var max-domain-length uint u63)
@@ -78,6 +96,16 @@
           (> stacks-block-height expires-at)
           (<= stacks-block-height grace-end)))
     false))
+
+(define-private (is-valid-subdomain-label (label (string-ascii 63)))
+  (let ((label-len (len label)))
+    (and 
+      (>= label-len u1)
+      (<= label-len u63)
+      (not (is-eq label "")))))
+
+(define-private (subdomain-available (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)))
+  (is-none (map-get? subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label })))
 
 (define-public (register-domain (domain (string-ascii 63)) (ttl uint))
   (let ((current-block stacks-block-height)
@@ -243,6 +271,71 @@
     (asserts! (is-eq (get owner domain-info) tx-sender) err-unauthorized)
     (set-domain-record domain "identity" (principal-to-string tx-sender) u86400)))
 
+(define-public (create-subdomain (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)) (subdomain-owner principal))
+  (let ((parent-info (unwrap! (map-get? domains { domain: parent-domain }) err-parent-domain-not-found))
+        (current-block stacks-block-height))
+    (asserts! (is-eq (get owner parent-info) tx-sender) err-unauthorized)
+    (asserts! (not (is-domain-expired parent-domain)) err-domain-expired)
+    (asserts! (is-valid-subdomain-label subdomain-label) err-invalid-subdomain)
+    (asserts! (subdomain-available parent-domain subdomain-label) err-subdomain-exists)
+    (map-set subdomains
+      { parent-domain: parent-domain, subdomain-label: subdomain-label }
+      {
+        owner: subdomain-owner,
+        resolver: subdomain-owner,
+        created-at: current-block,
+        updated-at: current-block
+      })
+    (var-set total-subdomains (+ (var-get total-subdomains) u1))
+    (ok subdomain-label)))
+
+(define-public (transfer-subdomain (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)) (new-owner principal))
+  (let ((subdomain-info (unwrap! (map-get? subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label }) err-subdomain-not-found)))
+    (asserts! (is-eq (get owner subdomain-info) tx-sender) err-unauthorized)
+    (map-set subdomains
+      { parent-domain: parent-domain, subdomain-label: subdomain-label }
+      (merge subdomain-info {
+        owner: new-owner,
+        updated-at: stacks-block-height
+      }))
+    (ok true)))
+
+(define-public (set-subdomain-resolver (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)) (resolver principal))
+  (let ((subdomain-info (unwrap! (map-get? subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label }) err-subdomain-not-found)))
+    (asserts! (is-eq (get owner subdomain-info) tx-sender) err-unauthorized)
+    (map-set subdomains
+      { parent-domain: parent-domain, subdomain-label: subdomain-label }
+      (merge subdomain-info {
+        resolver: resolver,
+        updated-at: stacks-block-height
+      }))
+    (ok true)))
+
+(define-public (set-subdomain-record 
+  (parent-domain (string-ascii 63)) 
+  (subdomain-label (string-ascii 63)) 
+  (record-type (string-ascii 10)) 
+  (value (string-ascii 256)) 
+  (ttl uint))
+  (let ((subdomain-info (unwrap! (map-get? subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label }) err-subdomain-not-found))
+        (parent-info (unwrap! (map-get? domains { domain: parent-domain }) err-parent-domain-not-found)))
+    (asserts! (not (is-domain-expired parent-domain)) err-domain-expired)
+    (asserts! (or
+      (is-eq (get owner subdomain-info) tx-sender)
+      (is-eq (get resolver subdomain-info) tx-sender)) err-unauthorized)
+    (map-set subdomain-records
+      { parent-domain: parent-domain, subdomain-label: subdomain-label, record-type: record-type }
+      { value: value, ttl: ttl })
+    (ok true)))
+
+(define-public (revoke-subdomain (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)))
+  (let ((parent-info (unwrap! (map-get? domains { domain: parent-domain }) err-parent-domain-not-found))
+        (subdomain-info (unwrap! (map-get? subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label }) err-subdomain-not-found)))
+    (asserts! (is-eq (get owner parent-info) tx-sender) err-unauthorized)
+    (map-delete subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label })
+    (var-set total-subdomains (- (var-get total-subdomains) u1))
+    (ok true)))
+
 (define-public (set-registration-fee (new-fee uint))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -298,6 +391,9 @@
 (define-read-only (get-total-domains)
   (var-get total-domains))
 
+(define-read-only (get-total-subdomains)
+  (var-get total-subdomains))
+
 (define-read-only (get-registration-fee)
   (var-get registration-fee))
 
@@ -336,6 +432,20 @@
           blocks-until-grace-end: (if (> grace-end current-block) (- grace-end current-block) u0)
         }))
     none))
+
+(define-read-only (get-subdomain-info (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)))
+  (map-get? subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label }))
+
+(define-read-only (get-subdomain-record (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)) (record-type (string-ascii 10)))
+  (map-get? subdomain-records { parent-domain: parent-domain, subdomain-label: subdomain-label, record-type: record-type }))
+
+(define-read-only (resolve-subdomain-to-owner (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)))
+  (match (map-get? subdomains { parent-domain: parent-domain, subdomain-label: subdomain-label })
+    subdomain-info (some (get owner subdomain-info))
+    none))
+
+(define-read-only (is-subdomain-available (parent-domain (string-ascii 63)) (subdomain-label (string-ascii 63)))
+  (subdomain-available parent-domain subdomain-label))
 
 (define-private (principal-to-string (addr principal))
   "SP1234567890ABCDEF")
