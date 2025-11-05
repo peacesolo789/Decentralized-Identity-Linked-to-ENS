@@ -1,4 +1,29 @@
-(define-constant contract-owner tx-sender)
+(define-constant contract-owner 'ST000000000000000000002AMW42H)
+(define-map ens-links
+  { subject: principal }
+  { name: (string-ascii 64), expiry-height: uint })
+
+(define-public (link-ens (name (string-ascii 64)) (ttl uint))
+  (if (> ttl u0)
+    (begin
+      (map-set ens-links { subject: tx-sender } { name: name, expiry-height: (+ stacks-block-height ttl) })
+      (ok true))
+    (err u100)))
+
+(define-public (revoke-link)
+  (begin
+    (map-delete ens-links { subject: tx-sender })
+    (ok true)))
+
+(define-read-only (get-link (subject principal))
+  (map-get? ens-links { subject: subject }))
+
+(define-read-only (is-link-active (subject principal))
+  (let ((entry (map-get? ens-links { subject: subject })))
+    (match entry
+      value
+        (>= (get expiry-height value) stacks-block-height)
+      false)))
 (define-constant err-owner-only (err u100))
 (define-constant err-domain-exists (err u101))
 (define-constant err-domain-not-found (err u102))
