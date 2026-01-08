@@ -474,3 +474,52 @@
 
 (define-private (principal-to-string (addr principal))
   "SP1234567890ABCDEF")
+
+(define-constant err-listing-exists (err u114))
+(define-constant err-listing-not-found (err u115))
+(define-constant err-invalid-price (err u116))
+(define-constant err-payment-failed (err u117))
+
+(define-map domain-listings
+  { domain: (string-ascii 63) }
+  {
+    seller: principal,
+    price: uint,
+    created-at: uint
+  })
+
+(define-public (list-domain-for-sale (domain (string-ascii 63)) (price uint))
+  (let ((domain-info (unwrap! (map-get? domains { domain: domain }) err-domain-not-found))
+        (current-block stacks-block-height))
+    (asserts! (is-eq (get owner domain-info) tx-sender) err-unauthorized)
+    (asserts! (not (is-domain-expired domain)) err-domain-expired)
+    (asserts! (> price u0) err-invalid-price)
+    (asserts! (is-none (map-get? domain-listings { domain: domain })) err-listing-exists)
+    (map-set domain-listings { domain: domain } { seller: tx-sender, price: price, created-at: current-block })
+    (ok true)))
+
+(define-public (cancel-domain-listing (domain (string-ascii 63)))
+  (let ((listing (unwrap! (map-get? domain-listings { domain: domain }) err-listing-not-found)))
+    (asserts! (is-eq (get seller listing) tx-sender) err-unauthorized)
+    (map-delete domain-listings { domain: domain })
+    (ok true)))
+
+(define-public (purchase-domain (domain (string-ascii 63)))
+  (let ((listing (unwrap! (map-get? domain-listings { domain: domain }) err-listing-not-found))
+        (domain-info (unwrap! (map-get? domains { domain: domain }) err-domain-not-found))
+        (seller (get seller listing))
+        (price (get price listing)))
+    (asserts! (not (is-domain-expired domain)) err-domain-expired)
+    (asserts! (is-ok (stx-transfer? price tx-sender seller)) err-payment-failed)
+    (map-set domains
+      { domain: domain }
+      (merge domain-info {
+        owner: tx-sender,
+        resolver: tx-sender,
+        updated-at: stacks-block-height
+      }))
+    (map-delete domain-listings { domain: domain })
+    (ok true)))
+
+(define-read-only (get-domain-listing (domain (string-ascii 63)))
+  (map-get? domain-listings { domain: domain }))
