@@ -523,3 +523,27 @@
 
 (define-read-only (get-domain-listing (domain (string-ascii 63)))
   (map-get? domain-listings { domain: domain }))
+
+(define-map identity-keys
+  { owner: principal }
+  { pubkey: (buff 33), created-at: uint, updated-at: uint })
+
+(define-public (set-identity-key (pubkey (buff 33)))
+  (let ((current-block stacks-block-height))
+    (map-set identity-keys
+      { owner: tx-sender }
+      { pubkey: pubkey, created-at: current-block, updated-at: current-block })
+    (ok true)))
+
+(define-public (clear-identity-key)
+  (begin
+    (map-delete identity-keys { owner: tx-sender })
+    (ok true)))
+
+(define-read-only (get-identity-key (owner principal))
+  (map-get? identity-keys { owner: owner }))
+
+(define-read-only (verify-identity-signature (owner principal) (message-digest (buff 32)) (signature (buff 65)))
+  (match (map-get? identity-keys { owner: owner })
+    value (secp256k1-verify message-digest signature (get pubkey value))
+    false))
